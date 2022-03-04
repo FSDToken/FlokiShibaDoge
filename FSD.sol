@@ -1,5 +1,5 @@
 /**
- *Submitted for verification at BscScan.com on 2022-02-10
+ *Submitted for verification at BscScan.com on 2022-03-03
 */
 
 /*
@@ -8,7 +8,7 @@
 
 // SPDX-License-Identifier: Unlicensed
 
-pragma solidity 0.8.11;
+pragma solidity 0.8.12;
 
 
 library Address {
@@ -278,10 +278,14 @@ interface IDEXRouter {
     ) external;
 }
 
+interface IDexPair {
+    event Sync(uint112 reserve0, uint112 reserve1);
+    function sync() external;
+}
+
 interface IDistributor {
     function startDistribution() external;
     function setDistributionParameters(uint256 _minPeriod, uint256 _minDistribution, uint256 _gas) external;
-    function setShares(address shareholder, uint256 amount) external;
     function process() external;
     function deposit() payable external;
     function claim(address shareholder) external;
@@ -291,6 +295,10 @@ interface IDistributor {
     function countShareholders() external view returns (uint256);
     function getTotalRewards() external view returns (uint256);
     function getTotalRewarded() external view returns (uint256);
+    function addShares(address shareholder, uint256 amount) external;
+    function removeShares(address shareholder, uint256 amount) external;
+    function setPool(address shareholder, uint256 pool) external;
+    function getShares(address shareholder) external view returns (uint256);
     function migrate(address distributor) external;
 }
 
@@ -372,17 +380,16 @@ contract FlokiShibaDoge is IERC20, Ownable {
     
     address WBNB;
 
-    address DEAD = 0x000000000000000000000000000000000000dEaD;
-    address ZERO = 0x0000000000000000000000000000000000000000;
+    address constant DEAD = 0x000000000000000000000000000000000000dEaD;
 
-    string constant _name = "Floki Shiba Doge";
+    string constant _name = "FlokiShibaDoge";
     string constant _symbol = "FSD";
     uint8 constant _decimals = 9;
 
     uint256 _totalSupply = 10_000_000 * (10 ** _decimals);
-    uint256 _maxBuyTxAmount = (_totalSupply * 1) / 100;
-    uint256 _maxSellTxAmount = (_totalSupply * 1) / 100;
-    uint256 _maxWalletSize = (_totalSupply * 1) / 200;
+    uint256 _maxBuyTxAmount = (_totalSupply * 3) / 200;
+    uint256 _maxSellTxAmount = (_totalSupply * 3) / 200;
+    uint256 _maxWalletSize = (_totalSupply * 2) / 100;
     uint256 minimumBalance = 1;
 
     mapping (address => uint256) _balances;
@@ -396,18 +403,18 @@ contract FlokiShibaDoge is IERC20, Ownable {
     mapping (address => bool) public whitelist;
     bool public whitelistEnabled = true;
 
-    uint256 marketingFee = 1000;
-    uint256 marketingSellFee = 1500;
-    uint256 distributionFee = 500;
-    uint256 distributionSellFee = 500;
-    uint256 liquidityFee = 500;
-    uint256 liquiditySellFee = 500;
-    uint256 totalBuyFee = marketingFee + distributionFee + liquidityFee;
-    uint256 totalSellFee = marketingSellFee + distributionSellFee + liquiditySellFee;
+    uint256 marketingFee = 600;
+    uint256 marketingSellFee = 600;
+    uint256 stakingFee = 200;
+    uint256 stakingSellFee = 200;
+    uint256 liquidityFee = 200;
+    uint256 liquiditySellFee = 200;
+    uint256 totalBuyFee = marketingFee + stakingFee + liquidityFee;
+    uint256 totalSellFee = marketingSellFee + stakingSellFee + liquiditySellFee;
     uint256 feeDenominator = 10000;
 
     address public liquidityFeeReceiver = DEAD;
-    address payable public marketingFeeReceiver = payable(0x65F50A7658851e3eD103C4f3F6CfDCB1E60F8df1);
+    address payable public marketingFeeReceiver = payable(0xe846EE6ebA508137ACdCF1Ea084196e623ECFF93);
 
     IDEXRouter public router;
     //address public routerAddress = 0x9Ac64Cc6e4415144C455BD8E4837Fea55603e5c3;
@@ -425,17 +432,17 @@ contract FlokiShibaDoge is IERC20, Ownable {
     bool public protectionEnabled = true;
     bool public protectionDisabled = false;
 
-    mapping (uint256 => IDistributor) public distributor;
-    mapping(address => uint256) public distributorPreference;
-    mapping(uint256 => bool) public distributorEnabled;
-    bool public publicRunning = true;
-    uint256 public processBonus = 1000;
+    IDistributor public staking10;
+    IDistributor public staking30;
+    mapping (address => address) public stakedIn;
+
+    uint256 public constant manualBurnFrequency = 60 minutes;
+    uint256 public lastManualLpBurnTime;
 
     bool public swapEnabled = false;
-    bool processEnabled = false;
     uint256 public swapThreshold = _totalSupply / 400;
     uint256 public swapMinimum = _totalSupply / 10000;
-    uint256 public maxSwapPercent = 20;
+    uint256 public maxSwapPercent = 40;
     bool inSwap;
     modifier swapping() { inSwap = true; _; inSwap = false; }
 
@@ -453,11 +460,6 @@ contract FlokiShibaDoge is IERC20, Ownable {
         isTxLimitExempt[address(this)] = true;
         isTxLimitExempt[_newOwner] = true;
         isTxLimitExempt[routerAddress] = true;
-        isDividendExempt[_newOwner] = true;
-        isDividendExempt[pair] = true;
-        isDividendExempt[address(this)] = true;
-        isDividendExempt[DEAD] = true;
-        isDividendExempt[ZERO] = true;
 
         uint256 half = _totalSupply * 90 / 100;
         _balances[_newOwner] = half;
@@ -525,15 +527,7 @@ contract FlokiShibaDoge is IERC20, Ownable {
         deadBlocks = _deadBlocks;
         startBullRun = true;
         whitelistEnabled = false;
-        _maxWalletSize = (_totalSupply * 2) / 100;
-        marketingFee = 500;
-        distributionFee = 200;
-        liquidityFee = 300;
         launchedAt = block.number;
-    }
-    
-    function startDistribution(uint256 _id) external onlyOwner {
-        distributor[_id].startDistribution();
     }
 
     function transfer(address recipient, uint256 amount) external override returns (bool) {
@@ -571,16 +565,10 @@ contract FlokiShibaDoge is IERC20, Ownable {
         
         _balances[recipient] = _balances[recipient] + amountReceived;
 
-        if(!isDividendExempt[sender]){ try distributor[distributorPreference[sender]].setShares(sender, _balances[sender]) {} catch {} }
-        if(!isDividendExempt[recipient]){ try distributor[distributorPreference[recipient]].setShares(recipient, _balances[recipient]) {} catch {} }
-
-        if (processEnabled)
-            try distributor[distributorPreference[sender]].process() {} catch {}
-
         if(!liquidityPools[sender] && shouldTakeFee(sender) && minimumBalance > 0 && _balances[sender] == 0)
             _balances[sender] = minimumBalance;
 
-        if (protectionEnabled && shouldTakeFee(sender))
+        if (launched() && protectionEnabled && shouldTakeFee(sender))
             antisnipe.onPreTransferCheck(sender, recipient, amount);
 
         emit Transfer(sender, recipient, amountReceived);
@@ -619,7 +607,7 @@ contract FlokiShibaDoge is IERC20, Ownable {
 
     function getTotalFee(bool selling) public view returns (uint256) {
         if(launchedAt + deadBlocks > block.number){ return feeDenominator - 1; }
-        if (selling) return  totalSellFee;
+        if (selling) return totalSellFee;
         return totalBuyFee;
     }
 
@@ -667,8 +655,8 @@ contract FlokiShibaDoge is IERC20, Ownable {
         uint256 totalBNBFee = totalFee - ((liquidityFee + liquiditySellFee) / 2);
 
         uint256 amountBNBLiquidity = (amountBNB * (liquidityFee + liquiditySellFee)) / totalBNBFee / 2;
-        uint256 amountBNBReflection = (amountBNB * (distributionFee + distributionSellFee)) / totalBNBFee;
-        uint256 amountBNBMarketing = amountBNB - (amountBNBLiquidity + amountBNBReflection);
+        uint256 amountBNBStaking = (amountBNB * (stakingFee + stakingSellFee)) / totalBNBFee;
+        uint256 amountBNBMarketing = amountBNB - (amountBNBLiquidity + amountBNBStaking);
         
         if (amountBNBMarketing > 0)
             marketingFeeReceiver.transfer(amountBNBMarketing);
@@ -684,50 +672,31 @@ contract FlokiShibaDoge is IERC20, Ownable {
             );
         }
 
-        emit FundsDistributed(amountBNBLiquidity, amountBNBMarketing, amountBNBReflection);
+        emit FundsDistributed(amountBNBLiquidity, amountBNBMarketing, amountBNBStaking);
     }
 
-    function togglePublicRunning(bool _enabled) external onlyOwner {
-        publicRunning = _enabled;
-    }
-    function updateProcessBonus(uint256 _amount) external onlyOwner {
-        require(_amount >= 200, "Bonus too high");
-        processBonus = _amount;
-    }
-    function processDistributors() external {
-        require(msg.sender == owner() || (publicRunning && balanceOf(msg.sender) > 0 && !isDividendExempt[msg.sender]), "Function closed");
+    function transferStaking(uint256 _BNB10, uint256 _BNB30) external onlyOwner {
         uint256 bal = address(this).balance;
-        require(bal > 100000000000000000, "Not enough balance to run distribution");
-        uint256 bonus = bal / processBonus;
-        uint256 dist = (bal - bonus) / 4;
+        require(_BNB10 > 0 && _BNB10 <= bal && _BNB30 > 0 && _BNB30 <=100 && _BNB10 < _BNB30 * 3 / 5 && _BNB10 + _BNB30 <= bal);
+        uint256 bal10 = _BNB10;
+        uint256 bal30 = _BNB30;
         
-        if (distributorEnabled[0])
-            try distributor[0].deposit{value: dist}() {} catch {}
-        if (distributorEnabled[1])
-            try distributor[1].deposit{value: dist}() {} catch {}
-        if (distributorEnabled[2])
-            try distributor[2].deposit{value: dist}() {} catch {}
-        if (distributorEnabled[3])
-            try distributor[3].deposit{value: dist}() {} catch {}
-        if(processEnabled) {
-            try distributor[distributorPreference[msg.sender]].process() {} catch {}
-        }
-        payable(msg.sender).transfer(bonus);
+        staking10.deposit{value: bal10}();
+        staking30.deposit{value: bal30}();
     }
 
-    function setDistributorEnabled(uint256 _id, bool _enabled) external onlyOwner {
-        distributorEnabled[_id] = _enabled;
+    function updateStaking10Day(address _contract) external onlyOwner {
+        staking10 = IDistributor(_contract);
+        isFeeExempt[_contract] = true;
+        isTxLimitExempt[_contract] = true;
+        emit UpdatedSettings('Staking 10 Day Updated', [Log(toString(abi.encodePacked(_contract)), 1), Log('', 0), Log('', 0)]);
     }
-    
-    function updateDistributor(uint256 _id, address _distributor, bool migrate) external onlyOwner {
-        emit UpdatedSettings('Migrated Distributor', [Log(concatenate('Old Distributor: ',toString(abi.encodePacked(address(distributor[_id])))), 1),Log(concatenate('New Distributor: ',toString(abi.encodePacked(_distributor))), 1), Log('', 0)]);
-        if (migrate) distributor[_id].migrate(_distributor);
-        distributor[_id] = IDistributor(_distributor);
-        distributorEnabled[_id] = true;
-        isFeeExempt[_distributor] = true;
-        isTxLimitExempt[_distributor] = true;
-        isDividendExempt[_distributor] = true;
-        emit UpdatedSettings('Distributor Updated', [Log(toString(abi.encodePacked(_distributor)), 1), Log('', 0), Log('', 0)]);
+
+    function updateStaking30Day(address _contract) external onlyOwner {
+        staking30 = IDistributor(_contract);
+        isFeeExempt[_contract] = true;
+        isTxLimitExempt[_contract] = true;
+        emit UpdatedSettings('Staking 30 Day Updated', [Log(toString(abi.encodePacked(_contract)), 1), Log('', 0), Log('', 0)]);
     }
     
     function addLiquidityPool(address lp, bool isPool) external onlyOwner {
@@ -740,11 +709,8 @@ contract FlokiShibaDoge is IERC20, Ownable {
     function switchRouter(address newRouter) external onlyOwner {
         router = IDEXRouter(newRouter);
         WBNB = router.WETH();
-        pair = IDEXFactory(router.factory()).createPair(WBNB, address(this));
-        liquidityPools[pair] = true;
-        isDividendExempt[pair] = true;
         isTxLimitExempt[newRouter] = true;
-        emit UpdatedSettings('Exchange Router Updated', [Log(concatenate('New Router: ',toString(abi.encodePacked(newRouter))), 1),Log(concatenate('New Liquidity Pair: ',toString(abi.encodePacked(pair))), 1), Log('', 0)]);
+        emit UpdatedSettings('Exchange Router Updated', [Log(concatenate('New Router: ',toString(abi.encodePacked(newRouter))), 1),Log('', 0), Log('', 0)]);
     }
     
     function setLiquidityCreator(address preSaleAddress) external onlyOwner {
@@ -755,30 +721,60 @@ contract FlokiShibaDoge is IERC20, Ownable {
         emit UpdatedSettings('Presale Setup', [Log(concatenate('Presale Address: ',toString(abi.encodePacked(preSaleAddress))), 1),Log('', 0), Log('', 0)]);
     }
     
-    function updateShares(uint256 _id, address shareholder) external onlyOwner {
-        if(!isDividendExempt[shareholder]){ distributor[_id].setShares(shareholder, _balances[shareholder]); }
-        else distributor[_id].setShares(shareholder, 0);
-        emit UpdatedSettings('Reset Shares', [Log(toString(abi.encodePacked(shareholder)), (!isDividendExempt[shareholder] ? _balances[shareholder] : 0)), Log('', 0), Log('', 0)]);
-    }
-    
-    function swapDistributor(uint256 _id) public {
+    function AddStake10Day() external {
         require (balanceOf(msg.sender) > 0, "Insufficient balance");
-        distributor[distributorPreference[msg.sender]].setShares(msg.sender, 0);
-        distributor[_id].setShares(msg.sender, balanceOf(msg.sender));
-        distributorPreference[msg.sender] = _id;
+        if (stakedIn[msg.sender] == address(0)) {
+            stakedIn[msg.sender] = address(staking10);
+        }
+        IDistributor(stakedIn[msg.sender]).addShares(msg.sender, balanceOf(msg.sender));
+        _basicTransfer(msg.sender, stakedIn[msg.sender], balanceOf(msg.sender));
+    }
+    function AddStake30Day() external {
+        require (balanceOf(msg.sender) > 0, "Insufficient balance");
+        if (stakedIn[msg.sender] == address(0)) {
+            stakedIn[msg.sender] = address(staking30);
+        }
+        IDistributor(stakedIn[msg.sender]).addShares(msg.sender, balanceOf(msg.sender));
+        _basicTransfer(msg.sender, stakedIn[msg.sender], balanceOf(msg.sender));
     }
     function JoinFlokiPool() external {
-        swapDistributor(0);
+        require (stakedIn[msg.sender] != address(0), "Not staked");
+        IDistributor(stakedIn[msg.sender]).setPool(msg.sender, 0);
     }
     function JoinShibaPool() external {
-        swapDistributor(1);
+        require (stakedIn[msg.sender] != address(0), "Not staked");
+        IDistributor(stakedIn[msg.sender]).setPool(msg.sender, 1);
     }
     function JoinDogePool() external {
-        swapDistributor(2);
+        require (stakedIn[msg.sender] != address(0), "Not staked");
+        IDistributor(stakedIn[msg.sender]).setPool(msg.sender, 2);
     }
     function JoinTriplePool() external {
-        swapDistributor(3);
+        require (stakedIn[msg.sender] != address(0), "Not staked");
+        IDistributor(stakedIn[msg.sender]).setPool(msg.sender, 3);
     }
+    function UnstakeAndClaim() external {
+        require (stakedIn[msg.sender] != address(0), "Not staked");
+        require (IDistributor(stakedIn[msg.sender]).getClaimTime(msg.sender) == 0, "Stake still locked");
+        uint256 stakeBalance = IDistributor(stakedIn[msg.sender]).getShares(msg.sender);
+        _basicTransfer(stakedIn[msg.sender], msg.sender, stakeBalance);
+        IDistributor(stakedIn[msg.sender]).removeShares(msg.sender, stakeBalance);
+        stakedIn[msg.sender] = address(0);
+    }
+
+    function getPoolStatistics() external view returns (uint256 totalAmount10, uint256 totalClaimed10, uint256 holders10, uint256 totalAmount30, uint256 totalClaimed30, uint256 holders30) {
+        totalAmount10 = staking10.getTotalRewards();
+        totalClaimed10 = staking10.getTotalRewarded();
+        holders10 = staking10.countShareholders();
+        totalAmount30 = staking30.getTotalRewards();
+        totalClaimed30 = staking30.getTotalRewarded();
+        holders30 = staking30.countShareholders();
+    }
+    
+    function getWalletStatistics(address wallet) external view returns (uint256 pending, uint256 claimed) {
+	    pending = IDistributor(stakedIn[wallet]).getUnpaidRewards(wallet);
+	    claimed = IDistributor(stakedIn[wallet]).getPaidRewards(wallet);
+	}
 
     function setTxLimit(uint256 buyNumerator, uint256 sellNumerator, uint256 divisor) external onlyOwner {
         require(buyNumerator > 0 && sellNumerator > 0 && divisor > 0 && divisor <= 10000);
@@ -793,20 +789,8 @@ contract FlokiShibaDoge is IERC20, Ownable {
         emit UpdatedSettings('Maximum Wallet Size', [Log('Tokens', _maxWalletSize / (10 ** _decimals)), Log('', 0), Log('', 0)]);
     }
 
-    function setIsDividendExempt(address holder, bool exempt) public onlyOwner {
-        require(holder != address(this) && !liquidityPools[holder] && holder != owner());
-        isDividendExempt[holder] = exempt;
-        if(exempt){
-            distributor[distributorPreference[holder]].setShares(holder, 0);
-        }else{
-            distributor[distributorPreference[holder]].setShares(holder, _balances[holder]);
-        }
-        emit UpdatedSettings(exempt ? 'Dividends Removed' : 'Dividends Enabled', [Log(toString(abi.encodePacked(holder)), 1), Log('', 0), Log('', 0)]);
-    }
-
     function setIsFeeExempt(address holder, bool exempt) external onlyOwner {
         isFeeExempt[holder] = exempt;
-        if (exempt) setIsDividendExempt(holder, exempt);
         emit UpdatedSettings(exempt ? 'Fees Removed' : 'Fees Enforced', [Log(toString(abi.encodePacked(holder)), 1), Log('', 0), Log('', 0)]);
     }
 
@@ -822,22 +806,22 @@ contract FlokiShibaDoge is IERC20, Ownable {
         }
     }
 
-    function setFees(uint256 _distributionFee, uint256 _distributionSellFee, uint256 _liquidityFee, uint256 _liquiditySellFee, uint256 _marketingFee, uint256 _marketingSellFee, uint256 _feeDenominator) external onlyOwner {
-        require((_distributionFee + _liquidityFee + _marketingFee) * 100 / feeDenominator <= 30, "Purchase fees too high");
-        require((_distributionSellFee + _liquiditySellFee + _marketingSellFee) * 100 / feeDenominator <= 40, "Sell fees too high");
-        distributionFee = _distributionFee;
-        distributionSellFee = _distributionSellFee;
+    function setFees(uint256 _stakingFee, uint256 _stakingSellFee, uint256 _liquidityFee, uint256 _liquiditySellFee, uint256 _marketingFee, uint256 _marketingSellFee, uint256 _feeDenominator) external onlyOwner {
+        require((_stakingFee + _liquidityFee + _marketingFee) * 100 / feeDenominator <= 30, "Purchase fees too high");
+        require((_stakingSellFee + _liquiditySellFee + _marketingSellFee) * 100 / feeDenominator <= 40, "Sell fees too high");
+        stakingFee = _stakingFee;
+        stakingSellFee = _stakingSellFee;
         liquidityFee = _liquidityFee;
         liquiditySellFee = _liquiditySellFee;
         marketingFee = _marketingFee;
         marketingSellFee = _marketingSellFee;
 
-        totalBuyFee = distributionFee + liquidityFee + marketingFee;
-        totalSellFee = _distributionSellFee + _liquiditySellFee + _marketingSellFee;
+        totalBuyFee = stakingFee + liquidityFee + marketingFee;
+        totalSellFee = _stakingSellFee + _liquiditySellFee + _marketingSellFee;
         feeDenominator = _feeDenominator;
         require(totalBuyFee + totalSellFee < feeDenominator / 2);
 
-        emit UpdatedSettings('Fees', [Log('Total Buy Fee Percent', totalBuyFee * 100 / feeDenominator), Log('Total Sell Fee Percent', totalSellFee * 100 / feeDenominator), Log('Distribution Percent', (_distributionFee + _distributionSellFee) * 100 / feeDenominator)]);
+        emit UpdatedSettings('Fees', [Log('Total Buy Fee Percent', totalBuyFee * 100 / feeDenominator), Log('Total Sell Fee Percent', totalSellFee * 100 / feeDenominator), Log('Distribution Percent', (_stakingFee + _stakingSellFee) * 100 / feeDenominator)]);
     }
 
     function setMinimumBalance(uint256 _minimum) external onlyOwner {
@@ -852,13 +836,12 @@ contract FlokiShibaDoge is IERC20, Ownable {
         emit UpdatedSettings('Fee Receivers', [Log(concatenate('Marketing Receiver: ',toString(abi.encodePacked(_marketingFeeReceiver))), 1), Log('', 0), Log('', 0)]);
     }
 
-    function setSwapBackSettings(bool _enabled, bool _processEnabled, uint256 _denominator, uint256 _swapMinimum) external onlyOwner {
+    function setSwapBackSettings(bool _enabled, uint256 _denominator, uint256 _swapMinimum) external onlyOwner {
         require(_denominator > 0);
         swapEnabled = _enabled;
-        processEnabled = _processEnabled;
         swapThreshold = _totalSupply / _denominator;
         swapMinimum = _swapMinimum * (10 ** _decimals);
-        emit UpdatedSettings('Swap Settings', [Log('Enabled', _enabled ? 1 : 0),Log('Swap Maximum', swapThreshold), Log('Auto-processing', _processEnabled ? 1 : 0)]);
+        emit UpdatedSettings('Swap Settings', [Log('Enabled', _enabled ? 1 : 0),Log('Swap Maximum', swapThreshold), Log('', 0)]);
     }
 
     function setMaxSwapPercent(uint256 _percent) external onlyOwner {
@@ -866,34 +849,21 @@ contract FlokiShibaDoge is IERC20, Ownable {
         maxSwapPercent = _percent;
     }
 
-    function setDistributionCriteria(uint256 _id, uint256 _minPeriod, uint256 _minDistribution, uint256 gas) external onlyOwner {
-        require(gas < 750000);
-        require(_minPeriod <= 24 hours);
-        distributor[_id].setDistributionParameters(_minPeriod, _minDistribution, gas);
-
-        emit UpdatedSettings('DistributionCriteria', [Log('MaxGas', gas),Log('PayPeriod', _minPeriod), Log('MinimumDistribution', _minDistribution)]);
-    }
-
     function getCirculatingSupply() public view returns (uint256) {
-        return _totalSupply - (balanceOf(DEAD) + balanceOf(ZERO));
+        return _totalSupply - (balanceOf(DEAD) + balanceOf(address(0)));
     }
-    
-    function getPoolStatistics(uint256 _id) external view returns (uint256 totalAmount, uint256 totalClaimed, uint256 holders) {
-        totalAmount = distributor[_id].getTotalRewards();
-        totalClaimed = distributor[_id].getTotalRewarded();
-        holders = distributor[_id].countShareholders();
-    }
-    
-    function getWalletStatistics(uint256 _id, address wallet) external view returns (uint256 pending, uint256 claimed) {
-	    pending = distributor[_id].getUnpaidRewards(wallet);
-	    claimed = distributor[_id].getPaidRewards(wallet);
-	}
 
-	function claimDividends() external {
-	    distributor[distributorPreference[msg.sender]].claim(msg.sender);
-        if (processEnabled)
-	        try distributor[distributorPreference[msg.sender]].process() {} catch {}
-	}
+    function burnLP(uint256 thousandths) external onlyOwner {
+        require(block.timestamp > lastManualLpBurnTime + manualBurnFrequency , "Must wait for cooldown to finish");
+        require(thousandths <= 50 && thousandths > 0, "Max of 5% of tokens in LP");
+        lastManualLpBurnTime = block.timestamp;
+        
+        uint256 pairBalance = balanceOf(pair);
+        
+        _basicTransfer(pair, DEAD, (pairBalance * thousandths) / 1000);
+        
+        IDexPair(pair).sync();
+    }
 	
 	function toString(bytes memory data) internal pure returns(string memory) {
         bytes memory alphabet = "0123456789abcdef";
